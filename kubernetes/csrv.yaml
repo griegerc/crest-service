@@ -1,0 +1,266 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: csrv
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: csrv-db-secret
+  namespace: csrv
+type: Opaque
+stringData:
+  MARIADB_ROOT_PASSWORD: "change-me-strong-password"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csrv-nginx-conf
+  namespace: csrv
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+        access_log /proc/self/fd/1;
+        error_log  /proc/self/fd/2;
+
+        root /var/www/csrv/public;
+        index index.php;
+        charset utf-8;
+
+        location / {
+            try_files $uri $uri/ /index.php?q=$uri;
+        }
+
+        location ~ \.php$ {
+            fastcgi_split_path_info ^(.+\.php)(/.+)$;
+            fastcgi_pass csrv-php:9000;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_intercept_errors off;
+            fastcgi_buffer_size 16k;
+            fastcgi_buffers 4 16k;
+        }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csrv-db-init
+  namespace: csrv
+data:
+  init.sql: |
+    SET SQL_MODE = "TRADITIONAL,NO_ENGINE_SUBSTITUTION";
+    SET FOREIGN_KEY_CHECKS = 0;
+
+    CREATE TABLE IF NOT EXISTS `crests` (
+        `userId` INT unsigned NOT NULL DEFAULT 0,
+        `crest` VARCHAR(255) NOT NULL DEFAULT '[]',
+        `lastUpdate` INT unsigned NOT NULL DEFAULT 0,
+        `lastFetch` INT unsigned NOT NULL DEFAULT 0,
+            PRIMARY KEY (`userId`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+
+    SET FOREIGN_KEY_CHECKS = 1;
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: csrv-mariadb-pvc
+  namespace: csrv
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csrv-mariadb
+  namespace: csrv
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csrv-mariadb
+  template:
+    metadata:
+      labels:
+        app: csrv-mariadb
+    spec:
+      containers:
+        - name: mariadb
+          image: mariadb:11.4
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: csrv-db-secret
+                  key: MARIADB_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: csrv
+          volumeMounts:
+            - name: db-data
+              mountPath: /var/lib/mysql
+            - name: db-init
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: csrv-mariadb-pvc
+        - name: db-init
+          configMap:
+            name: csrv-db-init
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csrv-mariadb
+  namespace: csrv
+spec:
+  selector:
+    app: csrv-mariadb
+  ports:
+    - port: 3306
+      targetPort: 3306
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csrv-php
+  namespace: csrv
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csrv-php
+  template:
+    metadata:
+      labels:
+        app: csrv-php
+    spec:
+      containers:
+        - name: php
+          image: csrv-php:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9000
+          env:
+            - name: mariadbHost
+              value: csrv-mariadb
+            - name: mariadbDatabase
+              value: csrv
+            - name: mariadbUsername
+              value: root
+            - name: mariadbPassword
+              valueFrom:
+                secretKeyRef:
+                  name: csrv-db-secret
+                  key: MARIADB_ROOT_PASSWORD
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csrv-php
+  namespace: csrv
+spec:
+  selector:
+    app: csrv-php
+  ports:
+    - port: 9000
+      targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csrv-nginx
+  namespace: csrv
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csrv-nginx
+  template:
+    metadata:
+      labels:
+        app: csrv-nginx
+    spec:
+      containers:
+        - name: nginx
+          image: csrv-nginx:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: csrv-nginx-conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csrv-nginx
+  namespace: csrv
+spec:
+  type: LoadBalancer
+  selector:
+    app: csrv-nginx
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: csrv-phpmyadmin
+  namespace: csrv
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: csrv-phpmyadmin
+  template:
+    metadata:
+      labels:
+        app: csrv-phpmyadmin
+    spec:
+      containers:
+        - name: phpmyadmin
+          image: phpmyadmin:5.2.1
+          ports:
+            - containerPort: 80
+          env:
+            - name: PMA_HOST
+              value: csrv-mariadb
+            - name: PMA_PORT
+              value: "3306"
+            - name: PMA_USER
+              value: root
+            - name: PMA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: csrv-db-secret
+                  key: MARIADB_ROOT_PASSWORD
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: csrv-phpmyadmin
+  namespace: csrv
+spec:
+  type: LoadBalancer
+  selector:
+    app: csrv-phpmyadmin
+  ports:
+    - port: 80
+      targetPort: 80

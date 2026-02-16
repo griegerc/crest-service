@@ -1,0 +1,52 @@
+services:
+  nginx:
+    container_name: "csrv-nginx"
+    build:
+      context: docker/nginx
+    ports:
+      - 8080:80
+    volumes:
+      - ./htdocs:/var/www/csrv
+      - ./docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+
+  php:
+    container_name: "csrv-php"
+    build:
+      context: docker/php
+    volumes:
+      - ./htdocs:/var/www/csrv
+    expose:
+      - 9000
+
+  mariadb:
+    container_name: "csrv-mariadb"
+    build:
+      context: docker/mariadb
+    volumes:
+      - csrv-mariadb:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3306:3306"
+
+  phpmyadmin:
+    container_name: "csrv-phpmyadmin"
+    build:
+      context: docker/phpmyadmin
+    ports:
+      - 8081:80
+    links:
+      - mariadb:db
+    environment:
+      MYSQL_USER: root
+      MYSQL_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: root
+      PMA_USER: root
+      PMA_PASSWORD: root
+      PMA_HOST: mariadb
+      PMA_PORT: 3306
+      PMA_ARBITRARY: 1
+
+volumes:
+  csrv-mariadb:
+    name: "csrv-mariadb"
